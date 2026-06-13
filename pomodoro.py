@@ -14,6 +14,7 @@ from pathlib import Path
 import rumps
 import objc
 from Foundation import NSDate
+from AppKit import NSAlert, NSTextField, NSMakeRect, NSFloatingWindowLevel, NSApp, NSApplicationActivateIgnoringOtherApps
 
 # ─── 路径配置 ───────────────────────────────────────────
 ICLOUD_OBSIDIAN = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Auty"
@@ -548,17 +549,64 @@ class PomodoroApp(rumps.App):
         except Exception:
             pass
     
+    # ─── 浮层输入对话框（修复窗口被遮挡和无法输入） ─────
+    def _floating_input_window(self, message, title, default_text, ok_text, cancel_text, dimensions):
+        """创建始终在最上层、可正确获得键盘焦点的输入对话框
+        
+        修复原因：
+        - rumps.Window 使用 NSAlert.runModal()，窗口级别为 NSNormalWindowLevel，
+          会被其他 App 窗口挡住
+        - 文本输入框可能未获得 firstResponder，导致无法输入中文等内容
+        """
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_(ok_text)
+        alert.addButtonWithTitle_(cancel_text)
+        alert.setAlertStyle_(0)  # informational
+        
+        textfield = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, *dimensions))
+        textfield.setStringValue_(default_text)
+        textfield.setSelectable_(True)
+        textfield.setEditable_(True)
+        alert.setAccessoryView_(textfield)
+        
+        # 修复1: 设置为浮层级别，始终在最上层
+        alert.window().setLevel_(NSFloatingWindowLevel)
+        
+        # 修复2: 强制激活App + 窗口成为key window，确保能获取键盘焦点
+        NSApp.activateIgnoringOtherApps_(True)
+        alert.window().makeKeyAndOrderFront_(None)
+        
+        result = alert.runModal()
+        
+        textfield.validateEditing()
+        text = textfield.stringValue()
+        
+        # NSAlertFirstButtonReturn = 1000 (ok), NSAlertSecondButtonReturn = 1001 (cancel)
+        if result == 1000:
+            clicked = 1
+        else:
+            clicked = 0
+        
+        # 兼容 rumps.Response 接口
+        class _DialogResponse:
+            def __init__(self, c, t):
+                self.clicked = c
+                self.text = t
+        return _DialogResponse(clicked, text)
+    
     # ─── 任务备注 ───────────────────────────────────────
     def _set_task_note(self, _=None):
         """设置当前/下次工作番茄的任务备注"""
-        response = rumps.Window(
+        response = self._floating_input_window(
             message="当前任务是什么？",
             title="任务备注",
             default_text=self.current_task,
-            ok="确定",
-            cancel="取消",
+            ok_text="确定",
+            cancel_text="取消",
             dimensions=(320, 80),
-        ).run()
+        )
         
         if response.clicked:
             self.current_task = response.text.strip()
@@ -571,7 +619,7 @@ class PomodoroApp(rumps.App):
     def _preferences(self, _=None):
         """打开偏好设置窗口"""
         cfg = self.config
-        response = rumps.Window(
+        response = self._floating_input_window(
             message=(
                 f"工作时间（分钟）：\n"
                 f"短休息（分钟）：\n"
@@ -589,10 +637,10 @@ class PomodoroApp(rumps.App):
                 f"{1 if cfg['auto_start_break'] else 0}\n"
                 f"{1 if cfg['auto_start_work'] else 0}"
             ),
-            ok="保存",
-            cancel="取消",
+            ok_text="保存",
+            cancel_text="取消",
             dimensions=(300, 200),
-        ).run()
+        )
         
         if response.clicked:
             try:
