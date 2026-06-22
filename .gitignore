@@ -12,9 +12,8 @@ config.json
 # 运行时状态文件
 state.json
 
-# App 打包产物
+# App 临时打包目录
 build/
-dist/
 
 # macOS
 .DS_Store

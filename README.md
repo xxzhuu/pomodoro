@@ -32,11 +32,18 @@ python3 pomodoro.py
 
 ## 🖥 macOS 窗口版 App
 
-项目也提供原生 macOS 窗口界面，入口为 `mac_app.py`，可打包成双击启动的 `.app`。
+项目也提供原生 macOS 窗口界面，并已在仓库中包含打包好的 `dist/Pomodoro.app`。
+
+克隆后可以直接打开：
+
+```bash
+open dist/Pomodoro.app
+```
+
+如果你修改了源码，可以重新构建：
 
 ```bash
 ./build_app.sh
-open dist/Pomodoro.app
 ```
 
 窗口版支持：
