@@ -1,0 +1,3 @@
+pyobjc-framework-Cocoa
+py2app
+rumps

@@ -30,6 +30,23 @@ pip install rumps pyobjc-framework-UserNotifications
 python3 pomodoro.py
 ```
 
+## 🖥 macOS 窗口版 App
+
+项目也提供原生 macOS 窗口界面，入口为 `mac_app.py`，可打包成双击启动的 `.app`。
+
+```bash
+./build_app.sh
+open dist/Pomodoro.app
+```
+
+窗口版支持：
+- 大倒计时和进度条
+- 任务备注输入
+- 开始工作、短休息、长休息、暂停、结束
+- 今日统计
+- 自动休息、自动开始工作、提示音开关
+- 偏好设置和打开数据文件夹
+
 ## 🚀 开机自启
 
 ```bash
