@@ -11,6 +11,7 @@ OPTIONS = {
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1.0.0",
         "LSMinimumSystemVersion": "12.0",
+        "LSUIElement": True,
         "NSHighResolutionCapable": True,
     },
     "packages": ["objc", "AppKit", "Foundation"],

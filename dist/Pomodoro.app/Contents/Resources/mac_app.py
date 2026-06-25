@@ -2,9 +2,9 @@
 """
 Pomodoro for macOS
 
-A native Cocoa window for the existing Pomodoro data model. It keeps the
-iCloud/Obsidian work log format used by stats.py while offering a regular
-double-clickable macOS app experience.
+A native Cocoa menu bar popover for the existing Pomodoro data model. It keeps
+the iCloud/Obsidian work log format used by stats.py while staying out of the
+Dock and main window flow.
 """
 
 import datetime as dt
@@ -18,21 +18,23 @@ from objc import python_method
 from AppKit import (
     NSApp,
     NSApplication,
-    NSApplicationActivationPolicyRegular,
-    NSBackingStoreBuffered,
+    NSApplicationActivationPolicyAccessory,
     NSBezelStyleRounded,
     NSButton,
     NSColor,
+    NSComboBox,
     NSFont,
+    NSMinYEdge,
     NSMakeRect,
+    NSPopover,
+    NSPopoverBehaviorTransient,
     NSProgressIndicator,
     NSSound,
+    NSStatusBar,
     NSTextField,
-    NSWindow,
-    NSWindowStyleMaskClosable,
-    NSWindowStyleMaskMiniaturizable,
-    NSWindowStyleMaskResizable,
-    NSWindowStyleMaskTitled,
+    NSView,
+    NSViewController,
+    NSVariableStatusItemLength,
 )
 from Foundation import NSObject, NSTimer
 
@@ -78,6 +80,29 @@ def read_today_totals():
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return int(data.get("total_pomodoros", 0)), int(data.get("total_work_minutes", 0) * 60)
+
+
+def read_recent_tasks(limit=30):
+    if not DATA_DIR.exists():
+        return []
+
+    tasks = []
+    seen = set()
+    for path in sorted(DATA_DIR.glob("*.json"), reverse=True):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        for session in reversed(data.get("sessions", [])):
+            task = str(session.get("task", "")).strip()
+            if task and task not in seen:
+                seen.add(task)
+                tasks.append(task)
+                if len(tasks) >= limit:
+                    return tasks
+    return tasks
 
 
 def format_time(seconds):
@@ -168,8 +193,9 @@ def update_markdown(data, md_path):
 
 
 class PomodoroWindow(NSObject):
-    window = objc.ivar()
+    popover = objc.ivar()
     timer = objc.ivar()
+    status_item = objc.ivar()
 
     def init(self):
         self = objc.super(PomodoroWindow, self).init()
@@ -184,69 +210,126 @@ class PomodoroWindow(NSObject):
         self.session_start = None
         self.today_pomodoros, self.total_work_seconds = read_today_totals()
         self.timer = None
+        self.status_item = None
+        self.popover = None
+        self.task_history = read_recent_tasks()
         return self
 
     def applicationDidFinishLaunching_(self, notification):
-        self.build_window()
+        self.build_popover()
+        self.setup_status_item()
         self.restore_state()
-        NSApp.activateIgnoringOtherApps_(True)
 
     def applicationShouldTerminateAfterLastWindowClosed_(self, sender):
-        return True
+        return False
 
     @python_method
-    def build_window(self):
-        style = (
-            NSWindowStyleMaskTitled
-            | NSWindowStyleMaskClosable
-            | NSWindowStyleMaskMiniaturizable
-            | NSWindowStyleMaskResizable
-        )
-        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 460, 600),
-            style,
-            NSBackingStoreBuffered,
-            False,
-        )
-        self.window.setTitle_("Pomodoro")
-        self.window.center()
-        self.window.setMinSize_((420, 560))
-
-        content = self.window.contentView()
+    def build_popover(self):
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 380, 560))
         content.setWantsLayer_(True)
         content.layer().setBackgroundColor_(NSColor.windowBackgroundColor().CGColor())
+        self.content_view = content
 
-        self.title_label = self.label("Pomodoro", 28, 540, 404, 32, 16, bold=True)
-        self.status_label = self.label("准备开始", 28, 510, 404, 26, 13)
-        self.time_label = self.label("25:00", 28, 410, 404, 84, 64, bold=True, center=True)
-        self.progress = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(64, 388, 332, 10))
+        self.title_label = self.label("Pomodoro", 24, 504, 332, 30, 16, bold=True)
+        self.status_label = self.label("准备开始", 24, 476, 332, 24, 13)
+        self.time_label = self.label("25:00", 24, 380, 332, 84, 60, bold=True, center=True)
+        self.progress = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(48, 360, 284, 10))
         self.progress.setIndeterminate_(False)
         self.progress.setMinValue_(0)
         self.progress.setMaxValue_(1)
         self.progress.setDoubleValue_(0)
         content.addSubview_(self.progress)
 
-        self.task_label = self.label("任务", 28, 348, 404, 22, 12)
-        self.task_field = NSTextField.alloc().initWithFrame_(NSMakeRect(28, 316, 404, 30))
+        self.task_label = self.label("任务", 24, 318, 332, 22, 12)
+        self.task_field = NSComboBox.alloc().initWithFrame_(NSMakeRect(24, 286, 332, 30))
         self.task_field.setPlaceholderString_("这一个番茄钟要推进什么？")
+        self.task_field.setCompletes_(True)
+        self.refresh_task_choices()
         content.addSubview_(self.task_field)
 
-        self.work_button = self.button("开始工作", 28, 260, 128, 36, "startWork:")
-        self.short_button = self.button("短休息", 166, 260, 128, 36, "startShortBreak:")
-        self.long_button = self.button("长休息", 304, 260, 128, 36, "startLongBreak:")
-        self.pause_button = self.button("暂停", 28, 210, 197, 36, "togglePause:")
-        self.stop_button = self.button("结束当前", 235, 210, 197, 36, "stopSession:")
+        self.work_button = self.button("开始工作", 24, 234, 104, 34, "startWork:")
+        self.short_button = self.button("短休息", 138, 234, 104, 34, "startShortBreak:")
+        self.long_button = self.button("长休息", 252, 234, 104, 34, "startLongBreak:")
+        self.pause_button = self.button("暂停", 24, 188, 160, 34, "togglePause:")
+        self.stop_button = self.button("结束当前", 196, 188, 160, 34, "stopSession:")
 
-        self.stats_label = self.label("", 28, 154, 404, 40, 13)
-        self.auto_break = self.checkbox("工作结束自动开始休息", 28, 112, self.config["auto_start_break"], "toggleAutoBreak:")
-        self.auto_work = self.checkbox("休息结束自动开始工作", 28, 84, self.config["auto_start_work"], "toggleAutoWork:")
-        self.sound_enabled = self.checkbox("完成时播放提示音", 28, 56, self.config["sound_enabled"], "toggleSound:")
+        self.stats_label = self.label("", 24, 140, 332, 34, 13)
+        self.auto_break = self.checkbox("工作结束自动开始休息", 24, 104, self.config["auto_start_break"], "toggleAutoBreak:")
+        self.auto_work = self.checkbox("休息结束自动开始工作", 24, 78, self.config["auto_start_work"], "toggleAutoWork:")
+        self.sound_enabled = self.checkbox("完成时播放提示音", 24, 52, self.config["sound_enabled"], "toggleSound:")
 
-        self.prefs_button = self.button("偏好设置", 28, 18, 128, 28, "openPreferences:")
-        self.open_data_button = self.button("打开数据文件夹", 166, 18, 148, 28, "openDataFolder:")
+        self.prefs_button = self.button("偏好设置", 24, 16, 98, 26, "openPreferences:")
+        self.open_data_button = self.button("打开数据文件夹", 132, 16, 120, 26, "openDataFolder:")
+        self.quit_button = self.button("退出", 262, 16, 94, 26, "quitApp:")
+
+        controller = NSViewController.alloc().init()
+        controller.setView_(content)
+        self.popover = NSPopover.alloc().init()
+        self.popover.setContentSize_((380, 560))
+        self.popover.setBehavior_(NSPopoverBehaviorTransient)
+        self.popover.setContentViewController_(controller)
 
         self.update_ui()
-        self.window.makeKeyAndOrderFront_(None)
+
+    @python_method
+    def setup_status_item(self):
+        self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+        button = self.status_item.button()
+        button.setTitle_("🍅")
+        button.setToolTip_("Pomodoro")
+        button.setTarget_(self)
+        button.setAction_("togglePopover:")
+        self.update_status_item()
+
+    @python_method
+    def toggle_popover(self):
+        if self.popover.isShown():
+            self.popover.performClose_(None)
+            return
+        button = self.status_item.button()
+        self.refresh_task_choices()
+        self.popover.showRelativeToRect_ofView_preferredEdge_(button.bounds(), button, NSMinYEdge)
+        NSApp.activateIgnoringOtherApps_(True)
+
+    def togglePopover_(self, sender):
+        self.toggle_popover()
+
+    @python_method
+    def update_status_item(self):
+        if self.status_item is None:
+            return
+
+        if self.state == "idle":
+            title = "🍅"
+            summary = "Pomodoro 就绪"
+        elif self.state == "paused":
+            title = f"⏸ {format_time(self.remaining_seconds)}"
+            summary = "已暂停"
+        elif self.current_type == "work":
+            title = f"🍅 {format_time(self.remaining_seconds)}"
+            summary = "工作中" + (f" - {self.current_task}" if self.current_task else "")
+        elif self.current_type == "short_break":
+            title = f"☕ {format_time(self.remaining_seconds)}"
+            summary = "短休息中"
+        else:
+            title = f"☕ {format_time(self.remaining_seconds)}"
+            summary = "长休息中"
+
+        button = self.status_item.button()
+        button.setTitle_(title)
+        button.setToolTip_(summary)
+
+    @python_method
+    def refresh_task_choices(self):
+        if not hasattr(self, "task_field"):
+            return
+        current = str(self.task_field.stringValue()).strip()
+        self.task_history = read_recent_tasks()
+        self.task_field.removeAllItems()
+        if self.task_history:
+            self.task_field.addItemsWithObjectValues_(self.task_history)
+        if current:
+            self.task_field.setStringValue_(current)
 
     @python_method
     def label(self, text, x, y, width, height, size, bold=False, center=False):
@@ -259,7 +342,7 @@ class PomodoroWindow(NSObject):
         label.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
         if center:
             label.setAlignment_(2)
-        self.window.contentView().addSubview_(label)
+        self.content_view.addSubview_(label)
         return label
 
     @python_method
@@ -269,7 +352,7 @@ class PomodoroWindow(NSObject):
         button.setBezelStyle_(NSBezelStyleRounded)
         button.setTarget_(self)
         button.setAction_(action)
-        self.window.contentView().addSubview_(button)
+        self.content_view.addSubview_(button)
         return button
 
     @python_method
@@ -280,7 +363,7 @@ class PomodoroWindow(NSObject):
         button.setState_(1 if checked else 0)
         button.setTarget_(self)
         button.setAction_(action)
-        self.window.contentView().addSubview_(button)
+        self.content_view.addSubview_(button)
         return button
 
     @python_method
@@ -350,6 +433,7 @@ class PomodoroWindow(NSObject):
             actual = self.duration_seconds() - self.remaining_seconds
             if actual > 30:
                 log_session(self.session_start, dt.datetime.now(), int(actual), self.current_task, False)
+                self.refresh_task_choices()
 
         self.stop_timer()
         self.clear_state()
@@ -375,6 +459,7 @@ class PomodoroWindow(NSObject):
         if self.current_type == "work":
             duration = self.duration_seconds()
             log_session(self.session_start, end_time, duration, self.current_task, True)
+            self.refresh_task_choices()
             self.today_pomodoros += 1
             self.total_work_seconds += duration
             notify("番茄钟完成", "可以休息一下了", self.config["sound_enabled"])
@@ -475,6 +560,11 @@ class PomodoroWindow(NSObject):
         self.pause_button.setEnabled_(active or paused)
         self.stop_button.setEnabled_(active or paused)
         self.pause_button.setTitle_("继续" if paused else "暂停")
+        self.update_status_item()
+
+    def quitApp_(self, sender):
+        self.save_state()
+        NSApp.terminate_(None)
 
     def toggleAutoBreak_(self, sender):
         self.config["auto_start_break"] = bool(sender.state())
@@ -527,7 +617,7 @@ class PomodoroWindow(NSObject):
 
 def main():
     app = NSApplication.sharedApplication()
-    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     delegate = PomodoroWindow.alloc().init()
     app.setDelegate_(delegate)
     app.run()
