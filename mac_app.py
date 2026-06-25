@@ -208,6 +208,7 @@ class PomodoroWindow(NSObject):
         self.current_task = ""
         self.remaining_seconds = 0
         self.session_start = None
+        self.stats_date = dt.date.today()
         self.today_pomodoros, self.total_work_seconds = read_today_totals()
         self.timer = None
         self.status_item = None
@@ -288,6 +289,7 @@ class PomodoroWindow(NSObject):
             return
         button = self.status_item.button()
         self.refresh_task_choices()
+        self.sync_today_totals()
         self.popover.showRelativeToRect_ofView_preferredEdge_(button.bounds(), button, NSMinYEdge)
         NSApp.activateIgnoringOtherApps_(True)
 
@@ -320,11 +322,12 @@ class PomodoroWindow(NSObject):
         button.setToolTip_(summary)
 
     @python_method
-    def refresh_task_choices(self):
+    def refresh_task_choices(self, force=False):
         if not hasattr(self, "task_field"):
             return
         current = str(self.task_field.stringValue()).strip()
-        self.task_history = read_recent_tasks()
+        if force or not self.task_history:
+            self.task_history = read_recent_tasks()
         self.task_field.removeAllItems()
         if self.task_history:
             self.task_field.addItemsWithObjectValues_(self.task_history)
@@ -401,6 +404,7 @@ class PomodoroWindow(NSObject):
 
     @python_method
     def start_session(self, session_type):
+        self.sync_today_totals()
         self.current_task = str(self.task_field.stringValue()).strip()
         self.current_type = session_type
         self.state = "working" if session_type == "work" else "breaking"
@@ -433,7 +437,7 @@ class PomodoroWindow(NSObject):
             actual = self.duration_seconds() - self.remaining_seconds
             if actual > 30:
                 log_session(self.session_start, dt.datetime.now(), int(actual), self.current_task, False)
-                self.refresh_task_choices()
+                self.refresh_task_choices(force=True)
 
         self.stop_timer()
         self.clear_state()
@@ -455,13 +459,13 @@ class PomodoroWindow(NSObject):
     def session_end(self):
         self.stop_timer()
         end_time = dt.datetime.now()
+        self.sync_today_totals()
 
         if self.current_type == "work":
             duration = self.duration_seconds()
             log_session(self.session_start, end_time, duration, self.current_task, True)
-            self.refresh_task_choices()
-            self.today_pomodoros += 1
-            self.total_work_seconds += duration
+            self.refresh_task_choices(force=True)
+            self.sync_today_totals(force=True)
             notify("番茄钟完成", "可以休息一下了", self.config["sound_enabled"])
             if self.config["auto_start_break"]:
                 next_type = (
@@ -530,7 +534,15 @@ class PomodoroWindow(NSObject):
             STATE_PATH.unlink(missing_ok=True)
 
     @python_method
+    def sync_today_totals(self, force=False):
+        today = dt.date.today()
+        if force or today != self.stats_date:
+            self.stats_date = today
+            self.today_pomodoros, self.total_work_seconds = read_today_totals()
+
+    @python_method
     def update_ui(self):
+        self.sync_today_totals()
         total = self.duration_seconds()
         remaining = self.remaining_seconds if self.state != "idle" else total
         progress = 0 if total <= 0 else 1 - (remaining / total)
